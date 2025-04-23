@@ -26,3 +26,27 @@ Install all requirements with:
 
 ```bash
 pip install -r requirements.txt
+📊 Approach
+Extract features and gender labels from RAVDESS audio filenames.
+
+Train a baseline emotion classification model.
+
+Evaluate performance across subgroups (male vs. female).
+
+Apply reweighing mitigation from AIF360.
+
+Re-evaluate and compare fairness metrics.
+
+📌 Notes
+The dataset is not included in the repository due to size. Please download it from: RAVDESS Dataset Link.
+
+Gender information is inferred from filename structure.
+
+🔗 Author
+Laura Capella — Master's in Human-Centered AI
+University of Milan
+
+yaml
+Copy
+Edit
+

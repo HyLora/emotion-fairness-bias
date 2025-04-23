@@ -24,8 +24,8 @@ The goal is to evaluate and mitigate gender bias in an emotion classification ta
 
 Install all requirements with:
 
-```bash
 pip install -r requirements.txt
+
 📊 Approach
 Extract features and gender labels from RAVDESS audio filenames.
 

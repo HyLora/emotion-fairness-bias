@@ -10,7 +10,6 @@ The goal is to evaluate and mitigate gender bias in an emotion classification ta
 
 ## 📁 Project Structure
 
-- `data/`: contains the audio files from RAVDESS.
 - `preprocessing/`: scripts to extract features and labels, and to infer gender from filenames.
 - `models/`: model definition and training pipeline (e.g., logistic regression, SVM).
 - `fairness/`: reweighing mitigation implementation using AIF360.

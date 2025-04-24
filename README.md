@@ -45,7 +45,4 @@ Gender information is inferred from filename structure.
 Laura Capella — Master's in Human-Centered AI
 University of Milan
 
-yaml
-Copy
-Edit
 

@@ -38,11 +38,22 @@ Re-evaluate and compare fairness metrics.
 
 📌 Notes
 The dataset is not included in the repository due to size. Please download it from: RAVDESS Dataset Link.
+## 🔊 Download the RAVDESS Dataset
+
+Due to GitHub's file size limits, the full RAVDESS dataset (`Audio_Song_Actors_01-24.zip`) is **not included in this repository**.
+
+You can download it manually from the official Zenodo page:
+
+👉 [Download RAVDESS - Audio_Song_Actors_01-24.zip (1.3 GB)](https://zenodo.org/record/1188976)
+
+After downloading, extract the `.zip` file and place the `Audio_Song_Actors_01-24` folder in the following location:
+
+your_project_directory/
+├── data/
+│   └── Audio_Song_Actors_01-24/
 
 Gender information is inferred from filename structure.
 
 🔗 Author
 Laura Capella — Master's in Human-Centered AI
 University of Milan
-
-

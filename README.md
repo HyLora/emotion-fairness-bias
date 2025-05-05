@@ -6,7 +6,7 @@
 >
 > This script uses the RAVDESS dataset to classify emotions (happy vs neutral) from audio signals. It introduces a controlled bias (by removing a fraction of male-happy samples), then applies the Reweighing method from IBM's AIF360 library to mitigate this bias. Fairness metrics and classification performance are compared before and after the mitigation.
 >
-> Developed by: Laura \[Last Name]
+> Developed by: Laura Capella
 > Course: Logics for AI – Fairness Project
 
 This repository investigates **bias mitigation in binary emotion classification** using **audio features** extracted from the **RAVDESS dataset**. A known imbalance is introduced in the data by removing a significant portion of "happy" samples from male speakers, and the **Reweighing algorithm** from IBM’s **AIF360** is applied to improve fairness without substantially sacrificing accuracy.

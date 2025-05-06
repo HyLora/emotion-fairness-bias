@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # Fair Speech Emotion Recognition
-# Author: [Your Name]
+# Author: Laura Capella
 # Date: May 2025
-# Course: Logics for AI - Logic of Computation and Information 2024-2025
+# Course: Logics for AI - HCAI 2024-2025
 
 import os
 import sys

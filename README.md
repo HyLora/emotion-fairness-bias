@@ -1,109 +1,94 @@
-## 📂 Fairness-Aware Emotion Classification Using AIF360
+# Fair Speech Emotion Recognition
 
-*Script: `fairness_audio_classification.py`*
-
-> **Fairness-aware Emotion Classification from Audio using AIF360**
->
-> This script uses the RAVDESS dataset to classify emotions (happy vs neutral) from audio signals. It introduces a controlled bias (by removing a fraction of male-happy samples), then applies the Reweighing method from IBM's AIF360 library to mitigate this bias. Fairness metrics and classification performance are compared before and after the mitigation.
->
-> Developed by: Laura Capella
-> Course: Logics for AI – Fairness Project
-
-This repository investigates **bias mitigation in binary emotion classification** using **audio features** extracted from the **RAVDESS dataset**. A known imbalance is introduced in the data by removing a significant portion of "happy" samples from male speakers, and the **Reweighing algorithm** from IBM’s **AIF360** is applied to improve fairness without substantially sacrificing accuracy.
+## Project Overview
+This project investigates **fairness issues in speech emotion recognition systems**. It demonstrates how bias can manifest in machine learning models and implements techniques to mitigate this bias, focusing on **gender fairness** in emotion classification.
 
 ---
 
-### 🧠 Objectives
-
-* Perform **emotion classification** (Happy vs Neutral) from speech audio.
-* Simulate **gender-based bias** by distorting the original distribution (70% removal of male-happy).
-* Use **AIF360's Reweighing method** to mitigate observed bias.
-* Measure and compare **accuracy**, **F1-score**, **ROC AUC**, and **fairness metrics** before and after mitigation.
-
----
-
-### 🗂️ Dataset & Parameters
-
-* **Source**: [RAVDESS Dataset](https://zenodo.org/record/1188976)
-* **Audio Files**: `.wav` from 24 actors, sampled at 22 050 Hz
-* **Emotions used**:
-
-  * `Neutral` (`label = 0`)
-  * `Happy` (`label = 1`)
-* **Gender inference**: Actor ID parity
-
-  * Even = Female (`gender = 0`)
-  * Odd  = Male   (`gender = 1`)
-* **Bias removal fraction**: `REMOVAL_FRACTION = 0.7` (70% of male-happy removed)
+## Academic Context
+- **Author:** Laura Capella
+- **Course:** Logics for AI – HCAI (2024–2025)  
+- **Professor:** Giuseppe Primiero  
+- **Module 3 Topics:**  
+  Data, Data Science, Data Quality, Bias and Bias Mitigation, Trustworthiness
 
 ---
 
-### 🔍 Feature Extraction
-
-* **Technique**: MFCC (13 coefficients)
-* **Library**: `librosa`
-* **Processing**:
-
-  1. Load audio at 22 050 Hz
-  2. Compute MFCCs
-  3. Average over time → 13-dimensional feature vector
-
----
-
-### 📊 Pipeline Overview
-
-1. **Data Extraction & Labeling**
-2. **Bias Introduction**: remove subset of male-happy samples
-3. **Visualization**: bar plots of (gender,label) distributions
-4. **Preprocessing**: `StandardScaler` + train/test split (80/20, stratified)
-5. **Baseline Model**: Logistic Regression
-6. **Fairness Mitigation**: AIF360 `Reweighing`
-7. **Evaluation**:
-
-   * Accuracy, F1-score, ROC AUC
-   * Fairness metrics: Disparate Impact, Statistical Parity Difference, Equal Opportunity Difference, Average Odds Difference
-   * Confusion matrices (normalized overlays)
+## Key Features
+- Extracts acoustic features (MFCCs) from speech audio using **librosa**
+- Intentionally induces **gender bias** in the dataset for demonstration
+- Implements and compares two **fairness mitigation techniques**:
+  - Prejudice Remover (in-processing)
+  - Reweighing (pre-processing)
+- Evaluates models using:
+  - **Performance metrics:** Accuracy, ROC AUC
+  - **Fairness metrics:** Disparate Impact, Equal Opportunity Difference
+- Visualizes the trade-off between model performance and fairness
+- Provides comprehensive result analysis
 
 ---
 
-### 📈 Results Summary
+## Dataset
+This project uses the **Ryerson Audio-Visual Database of Emotional Speech and Song (RAVDESS)**:
 
-| Metric                   | Baseline | Post-Reweighing |
-| ------------------------ | -------- | --------------- |
-| Accuracy                 | 0.XX     | 0.XX            |
-| F1-score                 | 0.XX     | 0.XX            |
-| ROC AUC                  | 0.XX     | 0.XX            |
-| Disparate Impact         | 0.XX     | ✅ \~1.0         |
-| Statistical Parity Diff. | 0.XX     | ✅ reduced       |
-| Equal Opportunity Diff.  | 0.XX     | ✅ reduced       |
-| Average Odds Difference  | 0.XX     | ✅ reduced       |
+- 24 professional actors (12 female, 12 male)  
+- Speaking and singing with various emotions  
+- 8 emotion categories: neutral, calm, happy, sad, angry, fearful, disgust, surprised
 
-*Exact values available in script output.*
+### Classification Focus
+- **Label 1:** Neutral (class `0`)  
+- **Label 3:** Happy (class `1`)  
+- **Protected Attribute:** Gender (`female: 0`, `male: 1`)
 
 ---
 
-### 🛠️ Requirements
+## Installation
+
+### Prerequisites
+- Python 3.7 or higher
+- Required packages (install with `pip install -r requirements.txt`):
+  - numpy  
+  - pandas  
+  - librosa  
+  - matplotlib  
+  - scikit-learn  
+  - aif360
+
+### Setup
+1. Clone this repository or download the source code  
+2. Install the dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Download the RAVDESS dataset from [Zenodo](https://zenodo.org/record/1188976)  
+4. Extract the audio files to the `Audio_Speech_Actors_01-24` directory  
+5. Run the experiment:
+   ```bash
+   python fair_speech_recognition.py
+   ```
+
+---
+
+## Usage
+
+The script supports the following command-line arguments:
 
 ```bash
-pip install numpy pandas matplotlib librosa scikit-learn aif360
+python fair_speech_recognition.py --data_dir PATH_TO_DATA --output_dir results --bias_drop 0.7 --eta 0.5
 ```
+
+### Available Arguments
+
+| Argument         | Description                                                     | Default                     |
+|------------------|-----------------------------------------------------------------|-----------------------------|
+| `--data_dir`     | Directory containing audio files                                | `Audio_Speech_Actors_01-24` |
+| `--output_dir`   | Directory to save results and plots                             | `results`                   |
+| `--sample_rate`  | Sample rate for audio processing                                | `22050`                     |
+| `--n_mfcc`       | Number of MFCC features to extract                              | `13`                        |
+| `--bias_drop`    | Fraction of male-happy samples to drop for bias induction       | `0.7`                       |
+| `--eta`          | Eta parameter for Prejudice Remover                             | `0.5`                       |
+| `--random_state` | Random seed for reproducibility                                 | `42`                        |
+| `--n_splits`     | Number of cross-validation splits                               | `5`                         |
+| `--no_plots`     | Disable plot generation (set this flag to skip visualizations)  | *(not set)*                 |
 
 ---
-
-### 📄 File Structure
-
-```
-🔹 Audio_Speech_Actors_01-24/     # RAVDESS audio files
-🔹 fairness_audio_classification.py  # main script with docstring header
-🔹 README.md
-```
-
----
-
-### 👩‍💼 Author
-
-**Laura Capella**
-Master's Degree in Human-Centered Artificial Intelligence
-Department of Philosophy, University of Milan
-Course: *Logics for AI*
-Supervisor: Prof. Giuseppe Primiero

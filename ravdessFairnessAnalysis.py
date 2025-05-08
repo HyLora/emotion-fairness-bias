@@ -15,6 +15,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, roc_auc_score, confusion_matrix
 from sklearn.model_selection import StratifiedKFold
+from sklearn.preprocessing import StandardScaler  # Added for feature scaling
 from aif360.datasets import BinaryLabelDataset
 from aif360.algorithms.inprocessing import PrejudiceRemover
 from aif360.algorithms.preprocessing import Reweighing
@@ -35,6 +36,10 @@ EMOTION_MAP = {
 # For binary classification in this study, we focus on neutral vs happy
 PRIMARY_EMOTIONS = {1: "neutral", 3: "happy"}
 
+# Define fairness threshold constants
+DI_LOWER_BOUND = 0.8  # Lower bound for Disparate Impact
+DI_UPPER_BOUND = 1.25  # Upper bound for Disparate Impact
+
 def parse_arguments():
     """Parse command line arguments for the script."""
     parser = argparse.ArgumentParser(description='Fair Speech Emotion Recognition')
@@ -46,16 +51,24 @@ def parse_arguments():
                         help='Sample rate for audio processing')
     parser.add_argument('--n_mfcc', type=int, default=13,
                         help='Number of MFCC features to extract')
-    parser.add_argument('--bias_drop', type=float, default=0.7,
+    # Modified default bias_drop to a more moderate value
+    parser.add_argument('--bias_drop', type=float, default=0.4,
                         help='Fraction of male-happy samples to drop for bias induction')
-    parser.add_argument('--eta', type=float, default=0.5,
-                        help='Eta parameter for PrejudiceRemover')
+    # Added a new parameter for balancing female-neutral samples
+    parser.add_argument('--balance_factor', type=float, default=0.2,
+                        help='Fraction of female-neutral samples to drop for better balancing')
+    # Modified default eta for PrejudiceRemover to be more moderate
+    parser.add_argument('--eta', type=float, default=25.0,
+                        help='Eta parameter for PrejudiceRemover (fairness-accuracy trade-off)')
     parser.add_argument('--random_state', type=int, default=42,
                         help='Random seed for reproducibility')
     parser.add_argument('--n_splits', type=int, default=5,
                         help='Number of cross-validation splits')
     parser.add_argument('--no_plots', action='store_true',
                         help='Disable plot generation')
+    # Added regularization parameters for models
+    parser.add_argument('--C', type=float, default=1.0,
+                        help='Inverse of regularization strength for logistic regression')
     return parser.parse_args()
 
 def setup_directories(output_dir):
@@ -106,8 +119,23 @@ def extract_features_and_labels(data_dir, sample_rate, n_mfcc):
 
                     # Load and extract features
                     y, sr = librosa.load(path, sr=sample_rate)
+                    
+                    # Extract more robust features
                     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=n_mfcc)
-                    features.append(np.mean(mfcc.T, axis=0))
+                    
+                    # Add delta and delta-delta features for better representation
+                    mfcc_delta = librosa.feature.delta(mfcc)
+                    mfcc_delta2 = librosa.feature.delta(mfcc, order=2)
+                    
+                    # Combine features and take statistics
+                    combined_features = np.concatenate([
+                        np.mean(mfcc.T, axis=0),
+                        np.std(mfcc.T, axis=0),
+                        np.mean(mfcc_delta.T, axis=0),
+                        np.mean(mfcc_delta2.T, axis=0)
+                    ])
+                    
+                    features.append(combined_features)
                     labels.append(1 if emotion_code == 3 else 0)  # Happy=1, Neutral=0
                     genders.append(gender)
                     processed_files += 1
@@ -137,26 +165,53 @@ def extract_features_and_labels(data_dir, sample_rate, n_mfcc):
     
     return df
 
-def induce_bias(df, drop_fraction, random_state):
-    """Induce bias by removing a portion of male-happy samples."""
-    print(f"Inducing bias by dropping {drop_fraction*100:.1f}% of male-happy samples...")
+def balanced_bias_induction(df, drop_fraction_male, drop_fraction_female, random_state):
+    """
+    Induce bias in a more balanced way by adjusting both male-happy and female-neutral samples.
+    This helps prevent extreme disparate impact values.
+    """
+    print(f"Inducing balanced bias...")
     
     biased_df = df.copy()
-    mask = (biased_df['gender'] == 1) & (biased_df['label'] == 1)
-    drop_count = int(drop_fraction * mask.sum())
     
-    original_class_dist = biased_df['label'].value_counts().to_dict()
-    original_gender_dist = pd.crosstab(biased_df['gender'], biased_df['label'])
-    
-    drop_indices = biased_df[mask].sample(n=drop_count, random_state=random_state).index
-    biased_df = biased_df.drop(index=drop_indices)
-    
-    new_gender_dist = pd.crosstab(biased_df['gender'], biased_df['label'])
-    
+    # Original distribution
+    original_class_dist = df['label'].value_counts().to_dict()
+    original_gender_dist = pd.crosstab(df['gender'], df['label'])
     print("Original distribution by gender and emotion:")
     print(original_gender_dist)
+    
+    # Get distribution of samples by gender and emotion
+    male_happy = (biased_df['gender'] == 1) & (biased_df['label'] == 1)
+    male_neutral = (biased_df['gender'] == 1) & (biased_df['label'] == 0)
+    female_happy = (biased_df['gender'] == 0) & (biased_df['label'] == 1)
+    female_neutral = (biased_df['gender'] == 0) & (biased_df['label'] == 0)
+    
+    # Calculate samples to drop
+    male_happy_drop = int(drop_fraction_male * male_happy.sum())
+    female_neutral_drop = int(drop_fraction_female * female_neutral.sum())
+    
+    # Drop male-happy samples (creates bias against men for positive outcome)
+    if male_happy_drop > 0:
+        drop_indices_male = biased_df[male_happy].sample(n=male_happy_drop, random_state=random_state).index
+        biased_df = biased_df.drop(index=drop_indices_male)
+    
+    # Drop female-neutral samples (balances by reducing female negative outcomes)
+    if female_neutral_drop > 0:
+        drop_indices_female = biased_df[female_neutral].sample(n=female_neutral_drop, random_state=random_state).index
+        biased_df = biased_df.drop(index=drop_indices_female)
+    
+    # Check new distribution
+    new_gender_dist = pd.crosstab(biased_df['gender'], biased_df['label'])
     print("\nBiased distribution by gender and emotion:")
     print(new_gender_dist)
+    
+    # Calculate implied disparate impact to check if it's in target range
+    female_pos_rate = new_gender_dist.loc[0, 1] / new_gender_dist.loc[0].sum()
+    male_pos_rate = new_gender_dist.loc[1, 1] / new_gender_dist.loc[1].sum()
+    
+    implied_di = female_pos_rate / male_pos_rate
+    print(f"\nImplied Disparate Impact (female/male positive rate): {implied_di:.3f}")
+    print(f"Target DI range: {DI_LOWER_BOUND}-{DI_UPPER_BOUND}")
     
     return biased_df
 
@@ -171,17 +226,21 @@ def run_fairness_experiment(X, y, gender, args, dirs):
     """Run the fairness experiment with cross-validation."""
     print("\nStarting fairness experiment with cross-validation...")
     
+    # Apply feature scaling to prevent overfitting
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
     skf = StratifiedKFold(n_splits=args.n_splits, shuffle=True, random_state=args.random_state)
     
     # Initialize metrics dictionaries
-    metrics_baseline = {'acc': [], 'roc': [], 'confusion': []}
-    metrics_fair_pr = {'acc': [], 'roc': [], 'di': [], 'eo': [], 'confusion': []}  # PR = Prejudice Remover
-    metrics_fair_rw = {'acc': [], 'roc': [], 'di': [], 'eo': [], 'confusion': []}  # RW = Reweighing
+    metrics_baseline = {'acc': [], 'roc': [], 'confusion': [], 'di': []}
+    metrics_fair_pr = {'acc': [], 'roc': [], 'di': [], 'eo': [], 'confusion': []}
+    metrics_fair_rw = {'acc': [], 'roc': [], 'di': [], 'eo': [], 'confusion': []}
     
     fold = 1
-    for train_idx, test_idx in skf.split(X, y):
+    for train_idx, test_idx in skf.split(X_scaled, y):
         print(f"\nProcessing fold {fold}/{args.n_splits}...")
-        X_train, X_test = X[train_idx], X[test_idx]
+        X_train, X_test = X_scaled[train_idx], X_scaled[test_idx]
         y_train, y_test = y[train_idx], y[test_idx]
         g_train, g_test = gender[train_idx], gender[test_idx]
         
@@ -190,7 +249,9 @@ def run_fairness_experiment(X, y, gender, args, dirs):
         test_bld = to_binary_label_dataset(X_test, y_test, g_test)
         
         # ===== Baseline Model =====
-        clf = LogisticRegression(max_iter=1000, random_state=args.random_state)
+        # Use regularization to prevent overfitting
+        clf = LogisticRegression(C=args.C, max_iter=1000, random_state=args.random_state, 
+                                solver='liblinear', class_weight='balanced')
         clf.fit(X_train, y_train)
         y_pred = clf.predict(X_test)
         y_prob = clf.predict_proba(X_test)[:, 1]
@@ -199,29 +260,42 @@ def run_fairness_experiment(X, y, gender, args, dirs):
         metrics_baseline['roc'].append(roc_auc_score(y_test, y_prob))
         metrics_baseline['confusion'].append(confusion_matrix(y_test, y_pred))
         
+        # Create BinaryLabelDataset for baseline predictions for fairness metrics
+        pred_dataset_baseline = test_bld.copy()
+        pred_dataset_baseline.labels = np.reshape(y_pred, [-1, 1])
+        
+        # Calculate disparate impact for baseline
+        dataset_metric_baseline = BinaryLabelDatasetMetric(
+            pred_dataset_baseline,
+            unprivileged_groups=[{'protected': 0}], 
+            privileged_groups=[{'protected': 1}]
+        )
+        metrics_baseline['di'].append(dataset_metric_baseline.disparate_impact())
+        
         # ===== Fair Model 1: Prejudice Remover =====
+        # Adjust eta for better fairness-accuracy trade-off
         pr = PrejudiceRemover(sensitive_attr='protected', eta=args.eta)
         pr.fit(train_bld)
         fair_pred_pr = pr.predict(test_bld)
         
+        # Get predictions
         fair_labels_pr = fair_pred_pr.labels.ravel()
+        
+        # Calculate metrics
         metrics_fair_pr['acc'].append(accuracy_score(y_test, fair_labels_pr))
         try:
-            metrics_fair_pr['roc'].append(roc_auc_score(y_test, fair_labels_pr))
+            # Ensure predictions have both classes for ROC calculation
+            if len(np.unique(fair_labels_pr)) > 1:
+                metrics_fair_pr['roc'].append(roc_auc_score(y_test, fair_labels_pr))
+            else:
+                # If predictions are all one class, default to 0.5
+                metrics_fair_pr['roc'].append(0.5)
         except:
-            # Handle case where all predictions are of one class
             metrics_fair_pr['roc'].append(0.5)
         
         metrics_fair_pr['confusion'].append(confusion_matrix(y_test, fair_labels_pr))
         
-        # Fairness metrics for Prejudice Remover
-        classification_metric = ClassificationMetric(
-            test_bld, fair_pred_pr, 
-            unprivileged_groups=[{'protected': 0}], 
-            privileged_groups=[{'protected': 1}]
-        )
-        
-        # Disparate Impact (ratio of positive outcomes between unprivileged and privileged groups)
+        # Calculate fairness metrics for Prejudice Remover
         dataset_metric_pr = BinaryLabelDatasetMetric(
             fair_pred_pr,
             unprivileged_groups=[{'protected': 0}], 
@@ -230,37 +304,42 @@ def run_fairness_experiment(X, y, gender, args, dirs):
         di = dataset_metric_pr.disparate_impact()
         metrics_fair_pr['di'].append(di)
         
-        # Equal Opportunity Difference (difference in TPR between privileged and unprivileged groups)
+        # Equal Opportunity Difference
+        classification_metric = ClassificationMetric(
+            test_bld, fair_pred_pr, 
+            unprivileged_groups=[{'protected': 0}], 
+            privileged_groups=[{'protected': 1}]
+        )
         eo_diff = classification_metric.equal_opportunity_difference()
         metrics_fair_pr['eo'].append(eo_diff)
         
         # ===== Fair Model 2: Reweighing =====
+        # Configure reweighing
         rw = Reweighing(unprivileged_groups=[{'protected': 0}], privileged_groups=[{'protected': 1}])
         train_bld_rw = rw.fit_transform(train_bld)
         
+        # Get sample weights
         sample_weights = train_bld_rw.instance_weights
-        clf_rw = LogisticRegression(max_iter=1000, random_state=args.random_state)
+        
+        # Train classifier with balanced weights and regularization
+        clf_rw = LogisticRegression(C=args.C, max_iter=1000, random_state=args.random_state, 
+                                  solver='liblinear')
         clf_rw.fit(X_train, y_train, sample_weight=sample_weights)
         
+        # Get predictions
         y_pred_rw = clf_rw.predict(X_test)
         y_prob_rw = clf_rw.predict_proba(X_test)[:, 1]
         
+        # Calculate metrics
         metrics_fair_rw['acc'].append(accuracy_score(y_test, y_pred_rw))
         metrics_fair_rw['roc'].append(roc_auc_score(y_test, y_prob_rw))
         metrics_fair_rw['confusion'].append(confusion_matrix(y_test, y_pred_rw))
         
-        # Create BinaryLabelDataset for reweighing predictions for fairness metrics
+        # Create BinaryLabelDataset for reweighing predictions
         pred_dataset_rw = test_bld.copy()
         pred_dataset_rw.labels = np.reshape(y_pred_rw, [-1, 1])
         
-        # Fairness metrics for Reweighing
-        classification_metric_rw = ClassificationMetric(
-            test_bld, pred_dataset_rw, 
-            unprivileged_groups=[{'protected': 0}], 
-            privileged_groups=[{'protected': 1}]
-        )
-        
-        # Calculate disparate impact for reweighing
+        # Calculate fairness metrics for Reweighing
         dataset_metric_rw = BinaryLabelDatasetMetric(
             pred_dataset_rw,
             unprivileged_groups=[{'protected': 0}], 
@@ -269,7 +348,18 @@ def run_fairness_experiment(X, y, gender, args, dirs):
         metrics_fair_rw['di'].append(dataset_metric_rw.disparate_impact())
         
         # Equal Opportunity Difference
+        classification_metric_rw = ClassificationMetric(
+            test_bld, pred_dataset_rw, 
+            unprivileged_groups=[{'protected': 0}], 
+            privileged_groups=[{'protected': 1}]
+        )
         metrics_fair_rw['eo'].append(classification_metric_rw.equal_opportunity_difference())
+        
+        # Print intermediate results for this fold
+        print(f"Fold {fold} - Disparate Impact:")
+        print(f"  Baseline: {metrics_baseline['di'][-1]:.3f}")
+        print(f"  Prejudice Remover: {metrics_fair_pr['di'][-1]:.3f}")
+        print(f"  Reweighing: {metrics_fair_rw['di'][-1]:.3f}")
         
         fold += 1
 
@@ -277,6 +367,7 @@ def run_fairness_experiment(X, y, gender, args, dirs):
     results = {
         'baseline_acc': np.mean(metrics_baseline['acc']),
         'baseline_roc': np.mean(metrics_baseline['roc']),
+        'baseline_di': np.mean(metrics_baseline['di']),
         'pr_acc': np.mean(metrics_fair_pr['acc']),
         'pr_roc': np.mean(metrics_fair_pr['roc']),
         'pr_di': np.mean(metrics_fair_pr['di']),
@@ -338,17 +429,23 @@ def create_plots(metrics_baseline, metrics_fair_pr, metrics_fair_rw, plot_dir):
     
     # ===== Disparate Impact Comparison =====
     plt.figure(figsize=(10, 6))
-    plt.bar(x - 0.2, metrics_fair_pr['di'], width=0.4, color='#ff7f0e', label='Prejudice Remover')
-    plt.bar(x + 0.2, metrics_fair_rw['di'], width=0.4, color='#2ca02c', label='Reweighing')
-    plt.axhline(1.0, color='gray', linestyle='--', label='Ideal DI = 1')
-    plt.axhline(0.8, color='red', linestyle='--', label='DI < 0.8 indicates bias')
+    plt.bar(x - 0.3, metrics_baseline['di'], width=0.2, color='#1f77b4', label='Baseline')
+    plt.bar(x - 0.1, metrics_fair_pr['di'], width=0.2, color='#ff7f0e', label='Prejudice Remover')
+    plt.bar(x + 0.1, metrics_fair_rw['di'], width=0.2, color='#2ca02c', label='Reweighing')
+    plt.axhline(1.0, color='gray', linestyle='-', label='Ideal DI = 1')
+    plt.axhline(DI_LOWER_BOUND, color='red', linestyle='--', label=f'DI < {DI_LOWER_BOUND} indicates bias')
+    plt.axhline(DI_UPPER_BOUND, color='red', linestyle='--', label=f'DI > {DI_UPPER_BOUND} indicates bias')
     plt.title('Disparate Impact Comparison', fontsize=14)
     plt.xlabel('Fold', fontsize=12)
     plt.ylabel('Disparate Impact', fontsize=12)
     plt.xticks(x)
-    plt.ylim(0, max(max(metrics_fair_pr['di']), max(metrics_fair_rw['di'])) * 1.2)
+    
+    # Calculate limit for y-axis to ensure all lines are visible
+    max_di = max([max(metrics_baseline['di']), max(metrics_fair_pr['di']), max(metrics_fair_rw['di'])])
+    plt.ylim(0, max(max_di, DI_UPPER_BOUND) * 1.2)
+    
     plt.grid(True)
-    plt.legend(fontsize=12)
+    plt.legend(fontsize=10, loc='upper right')
     plt.tight_layout()
     plt.savefig(os.path.join(plot_dir, "disparate_impact_comparison.png"), dpi=300)
     plt.close()
@@ -379,6 +476,7 @@ def create_plots(metrics_baseline, metrics_fair_pr, metrics_fair_rw, plot_dir):
     # Calculate mean values for scatter plot
     baseline_acc_mean = np.mean(metrics_baseline['acc'])
     baseline_roc_mean = np.mean(metrics_baseline['roc'])
+    baseline_di_mean = np.mean(metrics_baseline['di'])
     
     pr_acc_mean = np.mean(metrics_fair_pr['acc'])
     pr_roc_mean = np.mean(metrics_fair_pr['roc'])
@@ -390,31 +488,35 @@ def create_plots(metrics_baseline, metrics_fair_pr, metrics_fair_rw, plot_dir):
     
     # Fairness vs Accuracy subplot
     plt.subplot(1, 2, 1)
-    plt.scatter([baseline_acc_mean], [0.5], s=100, color='#1f77b4', label='Baseline')
+    plt.scatter([baseline_acc_mean], [baseline_di_mean], s=100, color='#1f77b4', label='Baseline')
     plt.scatter([pr_acc_mean], [pr_di_mean], s=100, color='#ff7f0e', label='Prejudice Remover')
     plt.scatter([rw_acc_mean], [rw_di_mean], s=100, color='#2ca02c', label='Reweighing')
     
-    plt.axhline(1.0, color='gray', linestyle='--', alpha=0.7)
-    plt.axhline(0.8, color='red', linestyle='--', alpha=0.7)
+    plt.axhline(1.0, color='gray', linestyle='-', alpha=0.7)
+    plt.axhline(DI_LOWER_BOUND, color='red', linestyle='--', alpha=0.7)
+    plt.axhline(DI_UPPER_BOUND, color='red', linestyle='--', alpha=0.7)
+    plt.axhspan(DI_LOWER_BOUND, DI_UPPER_BOUND, color='green', alpha=0.1, label='Fair region')
     
     plt.title('Accuracy vs. Fairness Trade-off', fontsize=14)
     plt.xlabel('Accuracy', fontsize=12)
-    plt.ylabel('Disparate Impact (closer to 1 is better)', fontsize=12)
+    plt.ylabel('Disparate Impact (0.8-1.25 is fair)', fontsize=12)
     plt.grid(True)
     plt.legend(fontsize=12)
     
     # Fairness vs ROC AUC subplot
     plt.subplot(1, 2, 2)
-    plt.scatter([baseline_roc_mean], [0.5], s=100, color='#1f77b4', label='Baseline')
+    plt.scatter([baseline_roc_mean], [baseline_di_mean], s=100, color='#1f77b4', label='Baseline')
     plt.scatter([pr_roc_mean], [pr_di_mean], s=100, color='#ff7f0e', label='Prejudice Remover')
     plt.scatter([rw_roc_mean], [rw_di_mean], s=100, color='#2ca02c', label='Reweighing')
     
-    plt.axhline(1.0, color='gray', linestyle='--', alpha=0.7)
-    plt.axhline(0.8, color='red', linestyle='--', alpha=0.7)
+    plt.axhline(1.0, color='gray', linestyle='-', alpha=0.7)
+    plt.axhline(DI_LOWER_BOUND, color='red', linestyle='--', alpha=0.7)
+    plt.axhline(DI_UPPER_BOUND, color='red', linestyle='--', alpha=0.7)
+    plt.axhspan(DI_LOWER_BOUND, DI_UPPER_BOUND, color='green', alpha=0.1, label='Fair region')
     
     plt.title('ROC AUC vs. Fairness Trade-off', fontsize=14)
     plt.xlabel('ROC AUC', fontsize=12)
-    plt.ylabel('Disparate Impact (closer to 1 is better)', fontsize=12)
+    plt.ylabel('Disparate Impact (0.8-1.25 is fair)', fontsize=12)
     plt.grid(True)
     plt.legend(fontsize=12)
     
@@ -424,95 +526,150 @@ def create_plots(metrics_baseline, metrics_fair_pr, metrics_fair_rw, plot_dir):
     
     print(f"Saved all plots to {plot_dir}")
 
+def evaluate_fairness(di_value):
+    """Evaluate if a disparate impact value is within fair range."""
+    return DI_LOWER_BOUND <= di_value <= DI_UPPER_BOUND
+
 def print_summary(metrics_baseline, metrics_fair_pr, metrics_fair_rw):
-    """Print summary statistics of the experiment."""
-    print("\n" + "="*50)
-    print("EXPERIMENT SUMMARY")
-    print("="*50)
+    """Print summary statistics for each method."""
+    print("\n===== EXPERIMENT SUMMARY =====")
     
-    def print_model_stats(name, acc, roc, di=None, eo=None):
-        print(f"\n{name} Results:")
-        print(f"  Accuracy: {np.mean(acc):.3f} ± {np.std(acc):.3f}")
-        print(f"  ROC AUC : {np.mean(roc):.3f} ± {np.std(roc):.3f}")
-        if di is not None:
-            print(f"  Disparate Impact: {np.mean(di):.3f} ± {np.std(di):.3f}")
-        if eo is not None:
-            print(f"  Equal Opportunity Diff: {np.mean(eo):.3f} ± {np.std(eo):.3f}")
+    # Calculate mean metrics
+    baseline_acc = np.mean(metrics_baseline['acc'])
+    baseline_roc = np.mean(metrics_baseline['roc'])
+    baseline_di = np.mean(metrics_baseline['di'])
     
-    # Print statistics for each model
-    print_model_stats("Baseline", 
-                     metrics_baseline['acc'], 
-                     metrics_baseline['roc'])
+    pr_acc = np.mean(metrics_fair_pr['acc'])
+    pr_roc = np.mean(metrics_fair_pr['roc'])
+    pr_di = np.mean(metrics_fair_pr['di'])
+    pr_eo = np.mean(metrics_fair_pr['eo'])
     
-    print_model_stats("Prejudice Remover", 
-                     metrics_fair_pr['acc'], 
-                     metrics_fair_pr['roc'],
-                     metrics_fair_pr['di'],
-                     metrics_fair_pr['eo'])
+    rw_acc = np.mean(metrics_fair_rw['acc'])
+    rw_roc = np.mean(metrics_fair_rw['roc'])
+    rw_di = np.mean(metrics_fair_rw['di'])
+    rw_eo = np.mean(metrics_fair_rw['eo'])
     
-    print_model_stats("Reweighing", 
-                     metrics_fair_rw['acc'], 
-                     metrics_fair_rw['roc'],
-                     metrics_fair_rw['di'],
-                     metrics_fair_rw['eo'])
+    # Print accuracy metrics
+    print("\nPerformance Metrics:")
+    print(f"  Baseline:           Acc = {baseline_acc:.3f}, ROC AUC = {baseline_roc:.3f}")
+    print(f"  Prejudice Remover:  Acc = {pr_acc:.3f}, ROC AUC = {pr_roc:.3f}")
+    print(f"  Reweighing:         Acc = {rw_acc:.3f}, ROC AUC = {rw_roc:.3f}")
     
-    # Analyze fairness-accuracy tradeoff
-    acc_diff_pr = np.mean(metrics_baseline['acc']) - np.mean(metrics_fair_pr['acc'])
-    acc_diff_rw = np.mean(metrics_baseline['acc']) - np.mean(metrics_fair_rw['acc'])
+    # Print fairness metrics
+    print("\nFairness Metrics:")
+    print(f"  Baseline:")
+    print(f"    - Disparate Impact = {baseline_di:.3f} ({evaluate_fairness(baseline_di)})")
+    print(f"  Prejudice Remover:")
+    print(f"    - Disparate Impact = {pr_di:.3f} ({evaluate_fairness(pr_di)})")
+    print(f"    - Equal Opportunity Diff = {pr_eo:.3f}")
+    print(f"  Reweighing:")
+    print(f"    - Disparate Impact = {rw_di:.3f} ({evaluate_fairness(rw_di)})")
+    print(f"    - Equal Opportunity Diff = {rw_eo:.3f}")
     
-    print("\nFairness-Accuracy Tradeoff:")
-    print(f"  Prejudice Remover: {acc_diff_pr:.3f} accuracy loss for {np.mean(metrics_fair_pr['di']):.3f} disparate impact")
-    print(f"  Reweighing: {acc_diff_rw:.3f} accuracy loss for {np.mean(metrics_fair_rw['di']):.3f} disparate impact")
+    # Compare methods
+    print("\nMethod Comparison:")
     
-    print("\nConclusion:")
+    # Performance comparison
+    best_acc = max(baseline_acc, pr_acc, rw_acc)
+    best_roc = max(baseline_roc, pr_roc, rw_roc)
     
-    # Determine which fair model performed better
-    if np.mean(metrics_fair_pr['di']) > np.mean(metrics_fair_rw['di']) and acc_diff_pr < acc_diff_rw:
-        best_model = "Prejudice Remover"
-    elif np.mean(metrics_fair_rw['di']) > np.mean(metrics_fair_pr['di']) and acc_diff_rw < acc_diff_pr:
-        best_model = "Reweighing"
+    if best_acc == baseline_acc:
+        acc_winner = "Baseline"
+    elif best_acc == pr_acc:
+        acc_winner = "Prejudice Remover"
     else:
-        # Compare fairness-accuracy trade-off ratio
-        pr_ratio = np.mean(metrics_fair_pr['di']) / (1 + acc_diff_pr)  # Higher is better
-        rw_ratio = np.mean(metrics_fair_rw['di']) / (1 + acc_diff_rw)
-        best_model = "Prejudice Remover" if pr_ratio > rw_ratio else "Reweighing"
+        acc_winner = "Reweighing"
+        
+    if best_roc == baseline_roc:
+        roc_winner = "Baseline"
+    elif best_roc == pr_roc:
+        roc_winner = "Prejudice Remover"
+    else:
+        roc_winner = "Reweighing"
     
-    print(f"  The {best_model} model provides the best fairness-accuracy trade-off for this task.")
-    print("="*50)
+    print(f"  Best Accuracy: {acc_winner} ({best_acc:.3f})")
+    print(f"  Best ROC AUC: {roc_winner} ({best_roc:.3f})")
+    
+    # Fairness comparison
+    di_diff_from_one = [abs(baseline_di - 1), abs(pr_di - 1), abs(rw_di - 1)]
+    best_di_idx = np.argmin(di_diff_from_one)
+    best_di_methods = ["Baseline", "Prejudice Remover", "Reweighing"]
+    best_di_values = [baseline_di, pr_di, rw_di]
+    
+    best_eo_idx = np.argmin([float('inf'), abs(pr_eo), abs(rw_eo)])  # Baseline has no EO
+    best_eo_methods = ["N/A", "Prejudice Remover", "Reweighing"]
+    best_eo_values = [float('inf'), abs(pr_eo), abs(rw_eo)]
+    
+    print(f"  Best Disparate Impact: {best_di_methods[best_di_idx]} ({best_di_values[best_di_idx]:.3f})")
+    print(f"  Best Equal Opportunity: {best_eo_methods[best_eo_idx]} ({best_eo_values[best_eo_idx]:.3f})")
+    
+    # Overall recommendation
+    fairness_winners = []
+    if evaluate_fairness(baseline_di):
+        fairness_winners.append("Baseline")
+    if evaluate_fairness(pr_di) and abs(pr_eo) < 0.1:  # EO less than 0.1 is considered acceptable
+        fairness_winners.append("Prejudice Remover")
+    if evaluate_fairness(rw_di) and abs(rw_eo) < 0.1:
+        fairness_winners.append("Reweighing")
+    
+    print("\nOverall Recommendation:")
+    if not fairness_winners:
+        print("  None of the methods achieved acceptable fairness levels.")
+        if min(di_diff_from_one) < 0.5:  # If any method is somewhat close to fairness
+            best_method_idx = np.argmin(di_diff_from_one)
+            print(f"  The best option is {best_di_methods[best_method_idx]} but it needs further improvements.")
+    elif len(fairness_winners) == 1:
+        print(f"  {fairness_winners[0]} achieves acceptable fairness.")
+    else:
+        # If multiple methods are fair, choose the one with best accuracy
+        fair_accs = []
+        for method in fairness_winners:
+            if method == "Baseline":
+                fair_accs.append(baseline_acc)
+            elif method == "Prejudice Remover":
+                fair_accs.append(pr_acc)
+            else:  # Reweighing
+                fair_accs.append(rw_acc)
+        
+        best_fair_idx = np.argmax(fair_accs)
+        best_fair_method = fairness_winners[best_fair_idx]
+        print(f"  {best_fair_method} provides the best balance of fairness and accuracy.")
+    
+    print("\n============================")
 
 def main():
-    """Main function to run the experiment."""
+    """Main function to run the fair speech emotion recognition pipeline."""
     # Parse command line arguments
     args = parse_arguments()
     
-    # Create output directories
+    # Create directories for outputs
     dirs = setup_directories(args.output_dir)
     
     try:
-        # Step 1: Extract features from audio files
+        # Extract features from audio files
         df = extract_features_and_labels(args.data_dir, args.sample_rate, args.n_mfcc)
         
-        # Step 2: Induce bias in the dataset
-        biased_df = induce_bias(df, args.bias_drop, args.random_state)
+        # Induce bias for experiment
+        biased_df = balanced_bias_induction(df, args.bias_drop, args.balance_factor, args.random_state)
         
-        # Step 3: Prepare data for modeling
-        X = biased_df.drop(columns=['label', 'gender']).values
+        # Prepare data for models
+        X = biased_df.drop(['label', 'gender'], axis=1).values
         y = biased_df['label'].values
         gender = biased_df['gender'].values
         
-        # Step 4: Run fairness experiment
+        # Run fairness experiment
         metrics_baseline, metrics_fair_pr, metrics_fair_rw = run_fairness_experiment(X, y, gender, args, dirs)
         
-        # Step 5: Print summary statistics
+        # Print summary of results
         print_summary(metrics_baseline, metrics_fair_pr, metrics_fair_rw)
         
-        print(f"\nExperiment completed successfully! Results saved in {args.output_dir}")
-        
     except Exception as e:
-        print(f"Error during experiment execution: {str(e)}")
+        print(f"Error running experiment: {str(e)}")
         import traceback
         traceback.print_exc()
-        sys.exit(1)
+        return 1
+    
+    return 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

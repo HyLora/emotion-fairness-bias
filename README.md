@@ -74,7 +74,7 @@ This project uses the **Ryerson Audio-Visual Database of Emotional Speech and So
 The script supports the following command-line arguments:
 
 ```bash
-python fair_speech_recognition.py --data_dir PATH_TO_DATA --output_dir results --bias_drop 0.7 --eta 0.5
+python fair_speech_recognition.py --data_dir PATH_TO_DATA --output_dir results --bias_drop 0.4 --eta 25.0
 ```
 
 ### Available Arguments
@@ -85,8 +85,8 @@ python fair_speech_recognition.py --data_dir PATH_TO_DATA --output_dir results -
 | `--output_dir`   | Directory to save results and plots                             | `results`                   |
 | `--sample_rate`  | Sample rate for audio processing                                | `22050`                     |
 | `--n_mfcc`       | Number of MFCC features to extract                              | `13`                        |
-| `--bias_drop`    | Fraction of male-happy samples to drop for bias induction       | `0.7`                       |
-| `--eta`          | Eta parameter for Prejudice Remover                             | `0.5`                       |
+| `--bias_drop`    | Fraction of male-happy samples to drop for bias induction       | `0.4`                       |
+| `--eta`          | Eta parameter for Prejudice Remover                             | `25.0`                       |
 | `--random_state` | Random seed for reproducibility                                 | `42`                        |
 | `--n_splits`     | Number of cross-validation splits                               | `5`                         |
 | `--no_plots`     | Disable plot generation (set this flag to skip visualizations)  | *(not set)*                 |

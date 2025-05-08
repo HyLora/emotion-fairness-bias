@@ -74,7 +74,7 @@ This project uses the **Ryerson Audio-Visual Database of Emotional Speech and So
 The script supports the following command-line arguments:
 
 ```bash
-python fair_speech_recognition.py --data_dir PATH_TO_DATA --output_dir results --bias_drop 0.4 --eta 25.0
+python ravdessFairnessAnalysis.py --data_dir PATH_TO_DATA --output_dir results --bias_drop 0.4 --eta 25.0
 ```
 
 ### Available Arguments

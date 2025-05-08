@@ -20,6 +20,8 @@ from aif360.datasets import BinaryLabelDataset
 from aif360.algorithms.inprocessing import PrejudiceRemover
 from aif360.algorithms.preprocessing import Reweighing
 from aif360.metrics import BinaryLabelDatasetMetric, ClassificationMetric
+from sklearn.model_selection import train_test_split, GridSearchCV
+import seaborn as sns
 
 # Define emotion labels mapping for clarity
 EMOTION_MAP = {
@@ -120,9 +122,17 @@ def extract_features_and_labels(data_dir, sample_rate, n_mfcc):
                     # Load and extract features
                     y, sr = librosa.load(path, sr=sample_rate)
                     
-                    # Extract more robust features
-                    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=n_mfcc)
-                    
+                    mfcc = librosa.feature.mfcc(
+                        y=y, 
+                        sr=sr, 
+                        n_mfcc=n_mfcc,
+                        n_fft=2048,           # Increased FFT window size
+                        hop_length=512,       # Hop length for frame shifting
+                        fmin=20,              # Minimum frequency
+                        fmax=8000,            # Maximum frequency for analysis 
+                        htk=True              # Use HTK formula for mel scale
+                    )
+
                     # Add delta and delta-delta features for better representation
                     mfcc_delta = librosa.feature.delta(mfcc)
                     mfcc_delta2 = librosa.feature.delta(mfcc, order=2)
@@ -165,6 +175,48 @@ def extract_features_and_labels(data_dir, sample_rate, n_mfcc):
     
     return df
 
+def optimize_hyperparameters(X, y, gender, random_state):
+    """Find optimal hyperparameters for the classifier."""
+    print("Optimizing hyperparameters...")
+    
+    # Split data for hyperparameter tuning
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=random_state, stratify=y
+    )
+    
+    # Scale features
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+    
+    # Define parameter grid
+    param_grid = {
+        'C': [0.1, 1.0, 10.0],
+        'class_weight': [None, 'balanced'],
+        'solver': ['liblinear', 'lbfgs']
+    }
+    
+    # Grid search with cross-validation
+    grid_search = GridSearchCV(
+        LogisticRegression(max_iter=1000, random_state=random_state),
+        param_grid=param_grid,
+        cv=5,
+        scoring='roc_auc',
+        n_jobs=-1
+    )
+    
+    grid_search.fit(X_train_scaled, y_train)
+    
+    print(f"Best parameters: {grid_search.best_params_}")
+    print(f"Best cross-validation score: {grid_search.best_score_:.3f}")
+    
+    # Evaluate best model on test set
+    best_model = grid_search.best_estimator_
+    test_score = best_model.score(X_test_scaled, y_test)
+    print(f"Test accuracy with best parameters: {test_score:.3f}")
+    
+    return grid_search.best_params_
+
 def balanced_bias_induction(df, drop_fraction_male, drop_fraction_female, random_state):
     """
     Induce bias in a more balanced way by adjusting both male-happy and female-neutral samples.
@@ -190,15 +242,19 @@ def balanced_bias_induction(df, drop_fraction_male, drop_fraction_female, random
     male_happy_drop = int(drop_fraction_male * male_happy.sum())
     female_neutral_drop = int(drop_fraction_female * female_neutral.sum())
     
-    # Drop male-happy samples (creates bias against men for positive outcome)
+   # Drop male-happy samples (creates bias against men for positive outcome)
     if male_happy_drop > 0:
         drop_indices_male = biased_df[male_happy].sample(n=male_happy_drop, random_state=random_state).index
         biased_df = biased_df.drop(index=drop_indices_male)
-    
+    else:
+        print("No male-happy samples to drop (male_happy_drop = 0)")
+
     # Drop female-neutral samples (balances by reducing female negative outcomes)
     if female_neutral_drop > 0:
         drop_indices_female = biased_df[female_neutral].sample(n=female_neutral_drop, random_state=random_state).index
         biased_df = biased_df.drop(index=drop_indices_female)
+    else:
+        print("No female-neutral samples to drop (female_neutral_drop = 0)")
     
     # Check new distribution
     new_gender_dist = pd.crosstab(biased_df['gender'], biased_df['label'])
@@ -222,22 +278,120 @@ def to_binary_label_dataset(X, y, protected):
     df['protected'] = protected
     return BinaryLabelDataset(df=df, label_names=['label'], protected_attribute_names=['protected'])
 
+def plot_confusion_matrices(metrics_baseline, metrics_fair_pr, metrics_fair_rw, plot_dir):
+    """Plot confusion matrices for each method."""
+    print("Plotting confusion matrices...")
+    
+    # Compute average confusion matrices
+    cm_baseline = np.mean(np.array(metrics_baseline['confusion']), axis=0)
+    cm_pr = np.mean(np.array(metrics_fair_pr['confusion']), axis=0)
+    cm_rw = np.mean(np.array(metrics_fair_rw['confusion']), axis=0)
+    
+    # Create a figure with 3 subplots
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    
+    # Plot each confusion matrix
+    for i, (cm, title) in enumerate(zip(
+        [cm_baseline, cm_pr, cm_rw],
+        ['Baseline', 'Prejudice Remover', 'Reweighing']
+    )):
+        # Normalize confusion matrix
+        cm_norm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+        
+        # Plot
+        sns.heatmap(
+            cm_norm, 
+            annot=True, 
+            fmt='.2f', 
+            cmap='Blues', 
+            ax=axes[i],
+            cbar=False,
+            xticklabels=['Neutral', 'Happy'],
+            yticklabels=['Neutral', 'Happy']
+        )
+        axes[i].set_title(f'{title} Confusion Matrix', fontsize=12)
+        axes[i].set_ylabel('True Label', fontsize=10)
+        axes[i].set_xlabel('Predicted Label', fontsize=10)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(plot_dir, 'confusion_matrices.png'), dpi=300)
+    plt.close()
+
+def statistical_significance_test(metrics_baseline, metrics_fair_pr, metrics_fair_rw):
+    """Perform statistical significance tests between methods."""
+    print("\nPerforming statistical significance tests...")
+    
+    # Prepare arrays
+    acc_data = {
+        'Baseline': metrics_baseline['acc'],
+        'PrejudiceRemover': metrics_fair_pr['acc'],
+        'Reweighing': metrics_fair_rw['acc']
+    }
+    
+    di_data = {
+        'Baseline': metrics_baseline['di'],
+        'PrejudiceRemover': metrics_fair_pr['di'],
+        'Reweighing': metrics_fair_rw['di']
+    }
+    
+    # Perform Friedman test on accuracy (non-parametric repeated measures ANOVA)
+    print("Accuracy comparison:")
+    try:
+        from scipy.stats import friedmanchisquare
+        
+        # Extract values as lists
+        acc_values = list(acc_data.values())
+        
+        # Perform Friedman test if we have enough samples
+        if len(acc_values[0]) >= 3:  # Need at least 3 samples
+            friedman_stat, p_value = friedmanchisquare(*acc_values)
+            print(f"  Friedman test: statistic={friedman_stat:.3f}, p-value={p_value:.3f}")
+            if p_value < 0.05:
+                print("  There are statistically significant differences between methods.")
+            else:
+                print("  No statistically significant differences between methods.")
+        else:
+            print("  Not enough samples for Friedman test.")
+    except Exception as e:
+        print(f"  Error in statistical test: {e}")
+    
+    # Perform pairwise Wilcoxon signed-rank tests for disparate impact
+    print("\nDisparate Impact comparison (pairwise):")
+    try:
+        from scipy.stats import wilcoxon
+        
+        pairs = [
+            ('Baseline', 'PrejudiceRemover'),
+            ('Baseline', 'Reweighing'),
+            ('PrejudiceRemover', 'Reweighing')
+        ]
+        
+        for method1, method2 in pairs:
+            stat, p = wilcoxon(di_data[method1], di_data[method2])
+            print(f"  {method1} vs {method2}: p-value={p:.3f}")
+            if p < 0.05:
+                print(f"    Significant difference found.")
+            else:
+                print(f"    No significant difference.")
+    except Exception as e:
+        print(f"  Error in Wilcoxon test: {e}")
 def run_fairness_experiment(X, y, gender, args, dirs):
     """Run the fairness experiment with cross-validation."""
-    print("\nStarting fairness experiment with cross-validation...")
-    
-    # Apply feature scaling to prevent overfitting
+
+    # Initialize Metrics with proper keys for all measurements
+    baseline_metrics = {'acc': [], 'roc': [], 'confusion': [], 'di': []}
+    metrics_fair_pr = {'acc': [], 'roc': [], 'di': [], 'eo': [], 'avg_odds': [], 'confusion': []}
+    metrics_fair_rw = {'acc': [], 'roc': [], 'di': [], 'eo': [], 'avg_odds': [], 'confusion': []}
+
+    # Scale features (this was missing)
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
-    
+
+    # Initialize the stratified k-fold cross validation
     skf = StratifiedKFold(n_splits=args.n_splits, shuffle=True, random_state=args.random_state)
-    
-    # Initialize metrics dictionaries
-    metrics_baseline = {'acc': [], 'roc': [], 'confusion': [], 'di': []}
-    metrics_fair_pr = {'acc': [], 'roc': [], 'di': [], 'eo': [], 'confusion': []}
-    metrics_fair_rw = {'acc': [], 'roc': [], 'di': [], 'eo': [], 'confusion': []}
-    
     fold = 1
+
+    # Run k-fold cross validation experiment
     for train_idx, test_idx in skf.split(X_scaled, y):
         print(f"\nProcessing fold {fold}/{args.n_splits}...")
         X_train, X_test = X_scaled[train_idx], X_scaled[test_idx]
@@ -249,16 +403,15 @@ def run_fairness_experiment(X, y, gender, args, dirs):
         test_bld = to_binary_label_dataset(X_test, y_test, g_test)
         
         # ===== Baseline Model =====
-        # Use regularization to prevent overfitting
         clf = LogisticRegression(C=args.C, max_iter=1000, random_state=args.random_state, 
                                 solver='liblinear', class_weight='balanced')
         clf.fit(X_train, y_train)
         y_pred = clf.predict(X_test)
         y_prob = clf.predict_proba(X_test)[:, 1]
         
-        metrics_baseline['acc'].append(accuracy_score(y_test, y_pred))
-        metrics_baseline['roc'].append(roc_auc_score(y_test, y_prob))
-        metrics_baseline['confusion'].append(confusion_matrix(y_test, y_pred))
+        baseline_metrics['acc'].append(accuracy_score(y_test, y_pred))
+        baseline_metrics['roc'].append(roc_auc_score(y_test, y_prob))
+        baseline_metrics['confusion'].append(confusion_matrix(y_test, y_pred))
         
         # Create BinaryLabelDataset for baseline predictions for fairness metrics
         pred_dataset_baseline = test_bld.copy()
@@ -270,7 +423,7 @@ def run_fairness_experiment(X, y, gender, args, dirs):
             unprivileged_groups=[{'protected': 0}], 
             privileged_groups=[{'protected': 1}]
         )
-        metrics_baseline['di'].append(dataset_metric_baseline.disparate_impact())
+        baseline_metrics['di'].append(dataset_metric_baseline.disparate_impact())
         
         # ===== Fair Model 1: Prejudice Remover =====
         # Adjust eta for better fairness-accuracy trade-off
@@ -288,9 +441,12 @@ def run_fairness_experiment(X, y, gender, args, dirs):
             if len(np.unique(fair_labels_pr)) > 1:
                 metrics_fair_pr['roc'].append(roc_auc_score(y_test, fair_labels_pr))
             else:
-                # If predictions are all one class, default to 0.5
+                # If predictions are all one class, ROC AUC is undefined
+                # Default to 0.5 (random classifier performance)
+                print(f"Warning: All predictions in fold {fold} for Prejudice Remover are same class. Setting ROC AUC to 0.5.")
                 metrics_fair_pr['roc'].append(0.5)
-        except:
+        except Exception as e:
+            print(f"Error calculating ROC AUC for Prejudice Remover: {e}")
             metrics_fair_pr['roc'].append(0.5)
         
         metrics_fair_pr['confusion'].append(confusion_matrix(y_test, fair_labels_pr))
@@ -313,6 +469,10 @@ def run_fairness_experiment(X, y, gender, args, dirs):
         eo_diff = classification_metric.equal_opportunity_difference()
         metrics_fair_pr['eo'].append(eo_diff)
         
+        # Add Average Odds Difference calculation
+        avg_odds_diff = classification_metric.average_odds_difference()
+        metrics_fair_pr['avg_odds'].append(avg_odds_diff)
+
         # ===== Fair Model 2: Reweighing =====
         # Configure reweighing
         rw = Reweighing(unprivileged_groups=[{'protected': 0}], privileged_groups=[{'protected': 1}])
@@ -355,39 +515,45 @@ def run_fairness_experiment(X, y, gender, args, dirs):
         )
         metrics_fair_rw['eo'].append(classification_metric_rw.equal_opportunity_difference())
         
+        # Add Average Odds Difference calculation
+        avg_odds_diff_rw = classification_metric_rw.average_odds_difference()
+        metrics_fair_rw['avg_odds'].append(avg_odds_diff_rw)
+        
         # Print intermediate results for this fold
         print(f"Fold {fold} - Disparate Impact:")
-        print(f"  Baseline: {metrics_baseline['di'][-1]:.3f}")
+        print(f"  Baseline: {baseline_metrics['di'][-1]:.3f}")
         print(f"  Prejudice Remover: {metrics_fair_pr['di'][-1]:.3f}")
         print(f"  Reweighing: {metrics_fair_rw['di'][-1]:.3f}")
         
         fold += 1
 
     # Save the results to CSV
-    results = {
-        'baseline_acc': np.mean(metrics_baseline['acc']),
-        'baseline_roc': np.mean(metrics_baseline['roc']),
-        'baseline_di': np.mean(metrics_baseline['di']),
-        'pr_acc': np.mean(metrics_fair_pr['acc']),
-        'pr_roc': np.mean(metrics_fair_pr['roc']),
-        'pr_di': np.mean(metrics_fair_pr['di']),
-        'pr_eo': np.mean(metrics_fair_pr['eo']),
-        'rw_acc': np.mean(metrics_fair_rw['acc']),
-        'rw_roc': np.mean(metrics_fair_rw['roc']),
-        'rw_di': np.mean(metrics_fair_rw['di']),
-        'rw_eo': np.mean(metrics_fair_rw['eo'])
-    }
+    results_df = pd.DataFrame({
+        'baseline_acc': [np.mean(baseline_metrics['acc'])],
+        'baseline_roc': [np.mean(baseline_metrics['roc'])],
+        'baseline_di': [np.mean(baseline_metrics['di'])],
+        'pr_acc': [np.mean(metrics_fair_pr['acc'])],
+        'pr_roc': [np.mean(metrics_fair_pr['roc'])],
+        'pr_di': [np.mean(metrics_fair_pr['di'])],
+        'pr_eo': [np.mean(metrics_fair_pr['eo'])],
+        'pr_avg_odds': [np.mean(metrics_fair_pr['avg_odds'])],
+        'rw_acc': [np.mean(metrics_fair_rw['acc'])],
+        'rw_roc': [np.mean(metrics_fair_rw['roc'])],
+        'rw_di': [np.mean(metrics_fair_rw['di'])],
+        'rw_eo': [np.mean(metrics_fair_rw['eo'])],
+        'rw_avg_odds': [np.mean(metrics_fair_rw['avg_odds'])]
+    })
     
-    results_df = pd.DataFrame([results])
+    # Use the data directory from dirs dictionary
     results_path = os.path.join(dirs['data'], 'experiment_results.csv')
     results_df.to_csv(results_path, index=False)
     print(f"Saved results to {results_path}")
     
     # Generate plots if enabled
     if not args.no_plots:
-        create_plots(metrics_baseline, metrics_fair_pr, metrics_fair_rw, dirs['plots'])
+        create_plots(baseline_metrics, metrics_fair_pr, metrics_fair_rw, dirs['plots'])
     
-    return metrics_baseline, metrics_fair_pr, metrics_fair_rw
+    return baseline_metrics, metrics_fair_pr, metrics_fair_rw
 
 def create_plots(metrics_baseline, metrics_fair_pr, metrics_fair_rw, plot_dir):
     """Create visualizations comparing model performance and fairness metrics."""
@@ -657,11 +823,18 @@ def main():
         y = biased_df['label'].values
         gender = biased_df['gender'].values
         
-        # Run fairness experiment
+        # Run fairness experiment - pass the directories dictionary instead of just output_dir
         metrics_baseline, metrics_fair_pr, metrics_fair_rw = run_fairness_experiment(X, y, gender, args, dirs)
         
         # Print summary of results
         print_summary(metrics_baseline, metrics_fair_pr, metrics_fair_rw)
+        
+        # Plot confusion matrices if plots are enabled
+        if not args.no_plots:
+            plot_confusion_matrices(metrics_baseline, metrics_fair_pr, metrics_fair_rw, dirs['plots'])
+            
+        # Run statistical significance tests
+        statistical_significance_test(metrics_baseline, metrics_fair_pr, metrics_fair_rw)
         
     except Exception as e:
         print(f"Error running experiment: {str(e)}")

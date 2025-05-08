@@ -64,7 +64,7 @@ This project uses the **Ryerson Audio-Visual Database of Emotional Speech and So
 4. Extract the audio files to the `Audio_Speech_Actors_01-24` directory  
 5. Run the experiment:
    ```bash
-   python fair_speech_recognition.py
+   python ravdnessFairnessAnalysis.py
    ```
 
 ---

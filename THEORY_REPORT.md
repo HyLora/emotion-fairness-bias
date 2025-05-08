@@ -77,7 +77,10 @@ Our implementation explores two distinct bias mitigation techniques:
 
 Prejudice Remover is an in-processing technique that modifies the learning algorithm itself. It adds a regularization term to the objective function to penalize discrimination:
 
-min_θ L(X, Y, θ) + η · R(X, D, θ)
+θ
+min
+​
+ L(X,Y,θ)+η⋅R(X,D,θ)
 
 Where:
 

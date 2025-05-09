@@ -53,13 +53,10 @@ def parse_arguments():
                         help='Sample rate for audio processing')
     parser.add_argument('--n_mfcc', type=int, default=13,
                         help='Number of MFCC features to extract')
-    # Modified default bias_drop to a more moderate value
     parser.add_argument('--bias_drop', type=float, default=0.4,
                         help='Fraction of male-happy samples to drop for bias induction')
-    # Added a new parameter for balancing female-neutral samples
     parser.add_argument('--balance_factor', type=float, default=0.2,
                         help='Fraction of female-neutral samples to drop for better balancing')
-    # Modified default eta for PrejudiceRemover to be more moderate
     parser.add_argument('--eta', type=float, default=25.0,
                         help='Eta parameter for PrejudiceRemover (fairness-accuracy trade-off)')
     parser.add_argument('--random_state', type=int, default=42,
@@ -68,7 +65,6 @@ def parse_arguments():
                         help='Number of cross-validation splits')
     parser.add_argument('--no_plots', action='store_true',
                         help='Disable plot generation')
-    # Added regularization parameters for models
     parser.add_argument('--C', type=float, default=1.0,
                         help='Inverse of regularization strength for logistic regression')
     return parser.parse_args()
